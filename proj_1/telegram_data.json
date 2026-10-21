@@ -1,0 +1,22 @@
+{
+    "clients": {
+        "1028136169": {
+            "first_name": "LE",
+            "username": "Luda_Goodevening",
+            "phone": "0939892948"
+        }
+    },
+    "link_codes": {
+        "WO1WBAAP": {
+            "phone": "0939892948"
+        }
+    },
+    "appointments": [
+        {
+            "phone": "0939892948",
+            "date": "2026-10-21",
+            "start_time": "12:30",
+            "status": "Scheduled"
+        }
+    ]
+}
