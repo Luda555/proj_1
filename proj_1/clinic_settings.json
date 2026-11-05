@@ -1,0 +1,6 @@
+{
+    "open_hour": 9,
+    "close_hour": 18,
+    "working_days": [0, 1, 2, 3, 4, 5],
+    "date_overrides": {}
+}

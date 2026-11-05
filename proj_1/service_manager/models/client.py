@@ -2,7 +2,7 @@
 import re
 import math
 
-from service_manager.exceptions import InvalidDataError
+from service_manager.exceptions import InvalidDataError, AccessDeniedError
 
 
 class User:
@@ -198,6 +198,49 @@ class Employee(User):
         )
 
         return total_salary
+
+    def change_compensation_settings(
+        self,
+        admin_user,
+        base_rate=None,
+        procedure_percent=None,
+        sales_percent=None,
+    ):
+        if not getattr(admin_user, "is_admin", False):
+            raise AccessDeniedError(
+                "Only an administrator can change salary settings."
+            )
+
+        # Validate all new values before changing anything.
+        if base_rate is not None:
+            self.__validate_number(
+                base_rate, "Base rate", minimum=0
+            )
+
+        if procedure_percent is not None:
+            self.__validate_number(
+                procedure_percent,
+                "Procedure percent",
+                minimum=0,
+                maximum=100,
+            )
+
+        if sales_percent is not None:
+            self.__validate_number(
+                sales_percent,
+                "Sales percent",
+                minimum=0,
+                maximum=100,
+            )
+
+        if base_rate is not None:
+            self.base_rate = base_rate
+
+        if procedure_percent is not None:
+            self.procedure_percent = procedure_percent
+
+        if sales_percent is not None:
+            self.sales_percent = sales_percent
 
     def __str__(self):
         rating_display = (

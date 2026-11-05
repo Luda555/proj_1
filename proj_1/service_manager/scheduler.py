@@ -1,12 +1,42 @@
 
+import json
+from pathlib import Path
 from datetime import date, datetime, time, timedelta
 
 
-OPEN_HOUR = 9
-CLOSE_HOUR = 18
 DEFAULT_STEP = 30
 SEARCH_DAYS = 7
 MAX_RESULTS = 10
+
+SETTINGS_FILE = (
+    Path(__file__).resolve().parent.parent / "clinic_settings.json"
+)
+
+
+def load_clinic_settings():
+    """Load clinic working schedule from JSON file."""
+    with open(SETTINGS_FILE, "r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def get_schedule_for_date(settings, check_date):
+    """Return working hours for a specific date, or None if closed."""
+    date_str = check_date.isoformat()
+    override = settings.get("date_overrides", {}).get(date_str)
+
+    if override is not None:
+        if override.get("closed", False):
+            return None
+
+        return (
+            override.get("open_hour", settings["open_hour"]),
+            override.get("close_hour", settings["close_hour"]),
+        )
+
+    if check_date.weekday() not in settings["working_days"]:
+        return None
+
+    return settings["open_hour"], settings["close_hour"]
 
 
 def _appointment_date(value):
@@ -62,7 +92,7 @@ def get_free_slots_for_all_suitable_staff(
     """
     Return available appointment slots for suitable employees.
 
-    Working hours: 09:00–18:00.
+    Working hours and working days are loaded from clinic_settings.json.
     Search horizon: the next seven calendar days.
     Slots start at 30-minute intervals.
     Existing Scheduled and In Progress appointments block time.
@@ -84,6 +114,8 @@ def get_free_slots_for_all_suitable_staff(
     if not suitable_employees:
         return []
 
+    settings = load_clinic_settings()
+
     duration = timedelta(minutes=total_duration_minutes)
     now = datetime.now()
     today = now.date()
@@ -92,13 +124,20 @@ def get_free_slots_for_all_suitable_staff(
     for day_offset in range(1, SEARCH_DAYS + 1):
         check_date = today + timedelta(days=day_offset)
 
+        schedule = get_schedule_for_date(settings, check_date)
+
+        if schedule is None:
+            continue
+
+        open_hour, close_hour = schedule
+
         day_start = datetime.combine(
             check_date,
-            time(OPEN_HOUR, 0),
+            time(open_hour, 0),
         )
         day_end = datetime.combine(
             check_date,
-            time(CLOSE_HOUR, 0),
+            time(close_hour, 0),
         )
 
         for employee in suitable_employees:
@@ -200,6 +239,7 @@ def get_free_slots_for_all_suitable_staff(
     )
 
     return all_slots[:MAX_RESULTS]
+
 
 
 

@@ -16,11 +16,11 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     CallbackQueryHandler,
-    JobQueue,
 )
 from telegram.error import InvalidToken
 
 from telegram_storage import load_data, save_data
+
 
 async def send_appointment_reminders(
     context: ContextTypes.DEFAULT_TYPE,
@@ -60,11 +60,11 @@ async def send_appointment_reminders(
         keyboard = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
-                    " Підтвердити",
+                    "Підтвердити",
                     callback_data=f"confirm:{index}",
                 ),
                 InlineKeyboardButton(
-                    " Скасувати",
+                    "Скасувати",
                     callback_data=f"cancel:{index}",
                 ),
             ]
@@ -74,7 +74,7 @@ async def send_appointment_reminders(
             await context.bot.send_message(
                 chat_id=int(telegram_id),
                 text=(
-                    " Нагадування від Beauty Clinic!\n\n"
+                    "Нагадування від Beauty Clinic!\n\n"
                     f"Ваш запис на завтра, {tomorrow}.\n"
                     f"Час: {appointment.get('start_time', 'не вказано')}\n\n"
                     "Будь ласка, підтвердіть або скасуйте візит."
@@ -125,6 +125,23 @@ async def handle_appointment_response(
 
     appointment = appointments[index]
 
+    # Check whether the Telegram user owns this appointment.
+    telegram_id = str(query.from_user.id)
+    client_data = data["clients"].get(telegram_id, {})
+
+    client_phone = client_data.get("phone")
+    appointment_phone = appointment.get("phone")
+
+    if (
+        not client_phone
+        or not appointment_phone
+        or client_phone != appointment_phone
+    ):
+        await query.edit_message_text(
+            "Ви не можете змінювати цей запис."
+        )
+        return
+
     if appointment.get("status") != "Scheduled":
         await query.edit_message_text(
             "Цей запис уже скасовано або його статус змінено."
@@ -133,10 +150,12 @@ async def handle_appointment_response(
 
     if action == "confirm":
         appointment["confirmed"] = True
-        message = " Дякуємо! Ваш запис підтверджено."
+        message = "Дякуємо! Ваш запис підтверджено."
+
     elif action == "cancel":
         appointment["status"] = "Cancelled"
-        message = " Ваш запис скасовано."
+        message = "Ваш запис скасовано."
+
     else:
         await query.edit_message_text(
             "Невідома дія. Зверніться до адміністратора."
@@ -147,18 +166,63 @@ async def handle_appointment_response(
     await query.edit_message_text(message)
 
 
-
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.CRITICAL,
+    level=logging.INFO,
 )
 
-logging.getLogger("httpx").setLevel(logging.CRITICAL)
-logging.getLogger("telegram").setLevel(logging.CRITICAL)
-logging.getLogger("telegram.ext").setLevel(logging.CRITICAL)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext").setLevel(logging.WARNING)
+
+
+def main() -> None:
+    if not TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN not found")
+
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
+        .pool_timeout(30)
+        .build()
+    )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("link", link))
+    app.add_handler(
+        CallbackQueryHandler(handle_appointment_response)
+    )
+
+    if app.job_queue is None:
+        raise RuntimeError(
+            'JobQueue недоступний. '
+            'Встанови: python -m pip install "python-telegram-bot[job-queue]"'
+        )
+
+    app.job_queue.run_daily(
+        send_appointment_reminders,
+        time=datetime.strptime("10:00", "%H:%M").time().replace(
+            tzinfo=ZoneInfo("Europe/Kyiv")
+        ),
+        name="appointment_reminders",
+    )
+
+    print("Beauty Clinic Telegram bot is running...")
+
+    try:
+        app.run_polling()
+    except InvalidToken:
+        print(
+            "Telegram authorization error. "
+            "Please check the token in .env. "
+            "The token is hidden."
+        )
 
 
 async def start(
@@ -186,7 +250,7 @@ async def start(
     first_name = user.first_name or "client"
 
     await message.reply_text(
-        f"Welcome to Beauty Clinic, {first_name}! 🌸\n\n"
+        f"Welcome to Beauty Clinic, {first_name}! \n\n"
         f"Your Telegram ID: {user.id}\n\n"
         "You will now be able to receive reminders "
         "about your appointments and confirm your visits."
@@ -234,56 +298,11 @@ async def link(
 
     await message.reply_text(
         "Your Telegram account has been linked "
-        "successfully to Beauty Clinic! 🌸"
+        "successfully to Beauty Clinic!"
     )
-
-
-def main() -> None:
-    if not TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN not found")
-
-    app = (
-        Application.builder()
-        .token(TOKEN)
-        .connect_timeout(30)
-        .read_timeout(30)
-        .write_timeout(30)
-        .pool_timeout(30)
-        .build()
-    )
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("link", link))
-    app.add_handler(
-        CallbackQueryHandler(handle_appointment_response)
-    )
-    
-    if app.job_queue is None:
-        raise RuntimeError(
-            'JobQueue недоступний. '
-            'Встанови: python -m pip install "python-telegram-bot[job-queue]"'
-        )
-
-    app.job_queue.run_daily(
-        send_appointment_reminders,
-        time=datetime.strptime("10:00", "%H:%M").time().replace(
-            tzinfo=ZoneInfo("Europe/Kyiv")
-        ),
-        name="appointment_reminders",
-    )
-
-    print("Beauty Clinic Telegram bot is running...")
-
-    try:
-        app.run_polling()
-    except InvalidToken:
-        print(
-            "Telegram authorization error. "
-            "Please check the token in .env. "
-            "The token is hidden."
-        )
 
 
 if __name__ == "__main__":
     main()
+
 

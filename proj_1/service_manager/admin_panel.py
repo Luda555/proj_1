@@ -1,5 +1,12 @@
 
 import os
+import json
+from datetime import date
+
+from service_manager.scheduler import (
+    SETTINGS_FILE,
+    load_clinic_settings,
+)
 
 from service_manager.models.client import Admin, Employee
 from service_manager.models.service import Service
@@ -15,6 +22,17 @@ VALID_STATUSES = {
     "Completed",
     "Cancelled",
 }
+
+
+WEEKDAY_NAMES = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+]
 
 
 def _pause():
@@ -45,12 +63,15 @@ def _normalize_phone(phone):
     """Normalize a phone number for employee lookup."""
     digits = "".join(char for char in str(phone) if char.isdigit())
 
-    # Treat Ukrainian +380XXXXXXXXX and 0XXXXXXXXX as equivalent.
     if digits.startswith("380") and len(digits) == 12:
         digits = "0" + digits[3:]
 
     return digits
 
+
+# --------------------------------------------------
+# SERVICES
+# --------------------------------------------------
 
 def _add_service(services):
     print("\n--- Add New Service ---")
@@ -63,7 +84,6 @@ def _add_service(services):
         print("Service code and name cannot be empty.")
         return
 
-    # Prevent duplicate service codes.
     existing_codes = {
         service.service_code.casefold()
         for service in services
@@ -103,6 +123,10 @@ def _add_service(services):
     print(f"Service '{new_service.name}' successfully added.")
 
 
+# --------------------------------------------------
+# INVENTORY
+# --------------------------------------------------
+
 def _view_inventory(inventory_list):
     print("\n--- Clinic Inventory ---")
 
@@ -117,6 +141,10 @@ def _view_inventory(inventory_list):
             f"Price per item: ${item.price_per_item:.2f}"
         )
 
+
+# --------------------------------------------------
+# FINANCIAL REPORT
+# --------------------------------------------------
 
 def _financial_report(appointments):
     print("\n--- Clinic Financial Report ---")
@@ -141,15 +169,21 @@ def _financial_report(appointments):
         f"Completed revenue: ${completed_revenue:.2f} "
         f"({completed_count} appointments)"
     )
+
     print(
         f"Projected revenue: ${projected_revenue:.2f} "
         f"({projected_count} appointments)"
     )
+
     print(
         f"Total business volume: "
         f"${completed_revenue + projected_revenue:.2f}"
     )
 
+
+# --------------------------------------------------
+# APPOINTMENT STATUS
+# --------------------------------------------------
 
 def _change_appointment_status(appointments, inventory_list):
     print("\n--- Change Appointment Status ---")
@@ -175,6 +209,7 @@ def _change_appointment_status(appointments, inventory_list):
     old_status = appointment.status
 
     print("\nAvailable statuses:")
+
     for status in sorted(VALID_STATUSES):
         print(f"- {status}")
 
@@ -188,87 +223,24 @@ def _change_appointment_status(appointments, inventory_list):
         print("The appointment already has this status.")
         return
 
-    if old_status in ("Completed", "Cancelled"):
-        print(
-            f"Cannot change an appointment that is already "
-            f"{old_status}."
-        )
-        return
-
-    # Check stock before completing an appointment.
-    product_to_deduct = None
-    quantity_to_deduct = 0
-
-    if new_status == "Completed":
-        products = getattr(appointment, "products", [])
-        quantity = getattr(appointment, "product_quantity", 0)
-
-        if products and quantity > 0:
-            # The current ProcedureAppointment model stores one shared
-            # quantity for all products. It cannot reliably represent
-            # separate quantities for multiple different products.
-            if len(products) > 1:
-                print(
-                    "Cannot safely deduct stock: this appointment contains "
-                    "multiple products, but the current order model stores "
-                    "only one shared product quantity. Update the order "
-                    "model to track each product and its quantity separately."
-                )
-                return
-
-            product_name = products[0]
-
-            product_to_deduct = next(
-                (
-                    item for item in inventory_list
-                    if item.product_name.casefold()
-                    == product_name.casefold()
-                ),
-                None,
-            )
-
-            if product_to_deduct is None:
-                print(
-                    f"Product '{product_name}' was not found in inventory. "
-                    "The appointment status was not changed."
-                )
-                return
-
-            if product_to_deduct.quantity < quantity:
-                print(
-                    f"Not enough '{product_name}' in stock. "
-                    f"Available: {product_to_deduct.quantity}; "
-                    f"required: {quantity}. "
-                    "The appointment status was not changed."
-                )
-                return
-
-            quantity_to_deduct = quantity
-
     admin_user = Admin(
         username="Admin",
         phone="380000000000",
         employee_id="ADMIN_ID",
     )
 
-    # Deduct stock only after checking availability.
     try:
-        if product_to_deduct is not None:
-            product_to_deduct.use_product(quantity_to_deduct)
-
         appointment.change_status(new_status, admin_user)
-
-        # The current Order.change_status method does not validate statuses
-        # itself, so this function validates them before calling it.
-        if appointment.status != new_status:
-            print("The appointment status was not changed.")
-            return
 
         print(f"Appointment status updated to '{new_status}'.")
 
     except (InvalidDataError, AccessDeniedError, ValueError) as error:
         print(f"Could not update appointment: {error}")
 
+
+# --------------------------------------------------
+# EMPLOYEES
+# --------------------------------------------------
 
 def _add_employee(employees):
     print("\n--- Register New Employee ---")
@@ -298,7 +270,6 @@ def _add_employee(employees):
         f"Employee '{employee.username}' "
         f"({employee.specialization}) successfully registered."
     )
-
 
 
 def _assign_service(services, employees):
@@ -373,6 +344,7 @@ def _assign_service(services, employees):
             int(number.strip())
             for number in service_numbers.split(",")
         ]
+
     except ValueError:
         print("Invalid input. Enter service numbers separated by commas.")
         return
@@ -384,7 +356,6 @@ def _assign_service(services, employees):
         print("One or more service numbers are invalid.")
         return
 
-    # Remove duplicate selections while preserving their order.
     selected_numbers = list(dict.fromkeys(selected_numbers))
 
     assigned_codes = {
@@ -411,11 +382,13 @@ def _assign_service(services, employees):
         print(
             f"\nSuccessfully assigned to {selected_employee.username}:"
         )
+
         for service_name in added_services:
             print(f"- {service_name}")
 
     if already_assigned:
         print("\nThese services were already assigned:")
+
         for service_name in already_assigned:
             print(f"- {service_name}")
 
@@ -423,6 +396,273 @@ def _assign_service(services, employees):
         print("No new services were added.")
 
 
+# --------------------------------------------------
+# EMPLOYEE COMPENSATION
+# --------------------------------------------------
+
+def _change_employee_compensation(employees):
+    print("\n--- Change Employee Salary Settings ---")
+
+    if not employees:
+        print("No employees found.")
+        return
+
+    for index, employee in enumerate(employees, start=1):
+        print(
+            f"{index}. {employee.username} | "
+            f"Phone: {employee.phone} | "
+            f"Base rate: ${employee.base_rate:.2f} | "
+            f"Procedures: {employee.procedure_percent}% | "
+            f"Sales: {employee.sales_percent}%"
+        )
+
+    employee_number = _read_number(
+        "\nSelect employee number: ",
+        int,
+        minimum=1,
+    )
+
+    if employee_number > len(employees):
+        print("Invalid employee selection.")
+        return
+
+    employee = employees[employee_number - 1]
+
+    print("\nPress Enter to keep the current value.")
+
+    def read_optional_value(prompt):
+        while True:
+            value = input(prompt).strip()
+
+            if not value:
+                return None
+
+            try:
+                return float(value)
+
+            except ValueError:
+                print("Please enter a valid number.")
+
+    base_rate = read_optional_value(
+        f"Base rate (${employee.base_rate}): "
+    )
+
+    procedure_percent = read_optional_value(
+        f"Procedure percent ({employee.procedure_percent}%): "
+    )
+
+    sales_percent = read_optional_value(
+        f"Sales percent ({employee.sales_percent}%): "
+    )
+
+    admin_user = Admin(
+        username="Admin",
+        phone="380000000000",
+        employee_id="ADMIN_ID",
+    )
+
+    employee.change_compensation_settings(
+        admin_user,
+        base_rate=base_rate,
+        procedure_percent=procedure_percent,
+        sales_percent=sales_percent,
+    )
+
+    print(
+        f"\nSalary settings for {employee.username} updated."
+    )
+
+
+# --------------------------------------------------
+# CLINIC WORKING SCHEDULE
+# --------------------------------------------------
+
+def _save_schedule(settings):
+    """Save clinic schedule to JSON file."""
+
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as file:
+        json.dump(
+            settings,
+            file,
+            indent=4,
+            ensure_ascii=False,
+        )
+
+
+def _manage_clinic_schedule():
+    """Manage clinic working hours and special dates."""
+
+    while True:
+        settings = load_clinic_settings()
+
+        print("\n--- Clinic Working Schedule ---")
+        print("1 - View current schedule")
+        print("2 - Change working hours")
+        print("3 - Change working days")
+        print("4 - Add or update a special date")
+        print("5 - Remove a special date")
+        print("6 - Back")
+
+        choice = input("Select option: ").strip()
+
+        if choice == "1":
+            print("\nDefault working hours:")
+            print(
+                f"{settings['open_hour']:02d}:00 - "
+                f"{settings['close_hour']:02d}:00"
+            )
+
+            print("\nWorking days:")
+
+            for day in settings["working_days"]:
+                print(f"- {WEEKDAY_NAMES[day]}")
+
+            print("\nSpecial dates:")
+
+            overrides = settings.get("date_overrides", {})
+
+            if not overrides:
+                print("No special dates.")
+
+            for special_date, hours in overrides.items():
+                if hours.get("closed"):
+                    print(f"{special_date}: Closed")
+                else:
+                    print(
+                        f"{special_date}: "
+                        f"{hours.get('open_hour', settings['open_hour']):02d}:00 - "
+                        f"{hours.get('close_hour', settings['close_hour']):02d}:00"
+                    )
+
+        elif choice == "2":
+            try:
+                open_hour = int(input("Opening hour (0-23): "))
+                close_hour = int(input("Closing hour (0-23): "))
+
+                if not (0 <= open_hour < close_hour <= 23):
+                    print("Invalid working hours.")
+                    continue
+
+                settings["open_hour"] = open_hour
+                settings["close_hour"] = close_hour
+
+                _save_schedule(settings)
+                print("Working hours updated.")
+
+            except ValueError:
+                print("Please enter valid numbers.")
+
+        elif choice == "3":
+            print("\nWorking days:")
+
+            for number, day_name in enumerate(WEEKDAY_NAMES, start=1):
+                print(f"{number} - {day_name}")
+
+            try:
+                days = input(
+                    "Enter working days separated by commas: "
+                )
+
+                working_days = sorted({
+                    int(day.strip()) - 1
+                    for day in days.split(",")
+                })
+
+                if not working_days or any(
+                    day < 0 or day > 6
+                    for day in working_days
+                ):
+                    print("Invalid working days.")
+                    continue
+
+                settings["working_days"] = working_days
+
+                _save_schedule(settings)
+                print("Working days updated.")
+
+            except ValueError:
+                print("Invalid input.")
+
+        elif choice == "4":
+            special_date = input(
+                "Enter date (YYYY-MM-DD): "
+            ).strip()
+
+            try:
+                date.fromisoformat(special_date)
+
+            except ValueError:
+                print("Invalid date format.")
+                continue
+
+            print("1 - Close clinic")
+            print("2 - Set special working hours")
+
+            action = input("Select option: ").strip()
+
+            if action == "1":
+                settings.setdefault("date_overrides", {})[
+                    special_date
+                ] = {"closed": True}
+
+            elif action == "2":
+                try:
+                    open_hour = int(input("Opening hour (0-23): "))
+                    close_hour = int(input("Closing hour (0-23): "))
+
+                    if not (0 <= open_hour < close_hour <= 23):
+                        print("Invalid working hours.")
+                        continue
+
+                    settings.setdefault(
+                        "date_overrides", {}
+                    )[special_date] = {
+                        "open_hour": open_hour,
+                        "close_hour": close_hour,
+                    }
+
+                except ValueError:
+                    print("Invalid input.")
+                    continue
+
+            else:
+                print("Invalid choice.")
+                continue
+
+            _save_schedule(settings)
+            print("Special date saved.")
+
+        elif choice == "5":
+            special_date = input(
+                "Enter date to remove (YYYY-MM-DD): "
+            ).strip()
+
+            overrides = settings.setdefault("date_overrides", {})
+
+            if special_date not in overrides:
+                print("Special date not found.")
+                continue
+
+            del overrides[special_date]
+
+            _save_schedule(settings)
+
+            print("Special date removed.")
+
+        elif choice == "6":
+            break
+
+        else:
+            print("Invalid choice.")
+
+        _pause()
+
+
+# --------------------------------------------------
+# MAIN ADMIN MENU
+# --------------------------------------------------
 
 def admin_menu(services, inventory_list, appointments, employees):
     """Display the clinic administrator menu."""
@@ -437,7 +677,9 @@ def admin_menu(services, inventory_list, appointments, employees):
         print("4 - Change appointment status")
         print("5 - Add new employee")
         print("6 - Assign Service to Employee")
-        print("7 - Back to main menu")
+        print("7 - Change Employee Salary Settings")
+        print("8 - Manage Clinic Working Schedule")
+        print("9 - Back to main menu")
 
         choice = input("Select admin action: ").strip()
 
@@ -470,15 +712,29 @@ def admin_menu(services, inventory_list, appointments, employees):
                 _pause()
 
             elif choice == "7":
+                _change_employee_compensation(employees)
+                _pause()
+
+            elif choice == "8":
+                _manage_clinic_schedule()
+
+            elif choice == "9":
                 print("Returning to main menu...")
                 break
 
             else:
-                print("Invalid choice. Select an option from 1 to 7.")
+                print("Invalid choice. Select an option from 1 to 9.")
                 _pause()
 
-        except (InvalidDataError, AccessDeniedError, ValueError) as error:
+        except (
+            InvalidDataError,
+            AccessDeniedError,
+            ValueError,
+            OSError,
+        ) as error:
             print(f"Error: {error}")
             _pause()
+   
+
 
 
