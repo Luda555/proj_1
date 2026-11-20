@@ -3,7 +3,7 @@ from datetime import date, datetime, time, timedelta
 from service_manager.models.client import Client, Admin, Employee
 from service_manager.exceptions import InvalidDataError, AccessDeniedError
 from service_manager.models.service import Service
-from service_manager.models.order import ProcedureAppointment
+from service_manager.models.order import Order, ProcedureAppointment
 from service_manager.models.inventory import Inventory
 from service_manager import scheduler
 from types import SimpleNamespace
@@ -660,11 +660,70 @@ def test_ProcedureAppointment_change_product_quantity_by_another_client():
     with pytest.raises(AccessDeniedError):
         order.change_product_quantity("Face Mask", 3, another_client)
 
+
+def test_order_with_products_only():
+    client = Client("Anna", "+380991112233")
+    inventory = Inventory("Face Mask", 10, 200)
+
+    order = Order(client_user=client)
+    order.add_product(inventory, client, quantity=3)
+
+    order.validate_items()
+
+    assert len(order.items) == 1
+    assert order.items[0]["type"] == "product"
+    assert order.items[0]["name"] == "Face Mask"
+    assert order.items[0]["quantity"] == 3
+    assert order.total_price == 600
+
+def test_order_with_products_and_procedures():
+    client = Client("Anna", "+380991112233")
+    service = Service(
+        service_code="PEEL-01",
+        name="Facial Cleansing",
+        category="Face",
+        base_price=800,
+        duration_minutes=60,
+    )
+    inventory = Inventory("Face Mask", 10, 200)
+    order = Order(
+        client_user=client,
+        services_list=[service],
+    )
+    order.add_product(inventory, client, quantity=2)
+
+    assert len(order.items) == 2
+    assert order.items[0]["type"] == "procedure"
+    assert order.items[1]["type"] == "product"
+    assert order.total_price == 1200
+
+def test_empty_order_is_not_allowed():
+    client = Client("Anna", "+380991112233")
+    order = Order(client_user=client)
+    with pytest.raises(
+        InvalidDataError,
+        match="An order must contain at least one item",
+    ):
+        order.validate_items()                
+
         #Перевіряємо списання товару
 def test_inventory_use_product():
     product = Inventory("Cream", 10, 100)
     product.use_product(3)
     assert product.quantity == 7
+
+def test_reserved_products_are_deducted_after_purchase():
+    client = Client("Anna", "+380991112233")
+    inventory = Inventory("Face Mask", 10, 200)
+    order = Order(client_user=client)
+    order.add_product(inventory, client, quantity=3)
+    assert inventory.quantity == 10
+    assert inventory.reserved_quantity == 3
+    order.complete_purchase()
+    assert order.status == "Completed"
+    assert inventory.quantity == 7
+    assert inventory.reserved_quantity == 0
+    assert inventory.available_quantity == 7    
 
 def test_inventory_use_product_not_enough():
     product = Inventory("Cream", 5, 100)
@@ -838,4 +897,44 @@ def test_calculate_salary_without_bonus():
     employee = Employee("Olena", "380939593854", "dermatolog")
     assert employee.calculate_salary(0, 0) == 20000
 
-   
+
+
+    # Перевірка доставки і оплати(delivery and pay)
+
+
+def test_order_initial_payment_and_fulfillment_values():
+    client = Client("Anna", "380939593854")
+    order = Order(client_user=client)
+    assert order.payment_method is None
+    assert order.payment_status == "pending"
+    assert order.fulfillment_method is None
+    assert order.delivery_address is None
+
+def test_order_change_payment_and_fulfillment_values():
+    client = Client("Anna", "380939593854")
+    order = Order(client_user=client)
+    order.payment_method = "card_on_delivery"
+    order.fulfillment_method = "nova_poshta"
+    order.delivery_address = "Відділення № 5, Київ" 
+    assert order.payment_method == "card_on_delivery"
+    assert order.fulfillment_method == "nova_poshta"
+    assert order.delivery_address == "Відділення № 5, Київ" 
+
+def test_order_only_product():
+    client = Client("Anna", "380939593854")
+    order = Order(client_user=client)
+    product1 = Inventory("Cream", 10, 100)
+    product2 = Inventory("Cream for face", 15, 350)
+    order.add_product(product1, client, quantity=3)
+    order.add_product(product2, client, quantity=1)
+    assert order.product_items[0]["name"] == "Cream"
+    assert order.product_items[1]["name"] == "Cream for face"
+    assert product1.price_per_item == 100
+    assert product2.price_per_item == 350       
+    assert order.total_price == 650
+    assert product1.quantity == 10
+    assert product2.quantity == 15
+    assert product1.reserved_quantity == 3
+    assert product2.reserved_quantity == 1
+    assert product1.available_quantity == 7
+    assert product2.available_quantity == 14

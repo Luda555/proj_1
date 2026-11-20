@@ -1,6 +1,5 @@
 
 from datetime import datetime
-from abc import ABC, abstractmethod
 
 from service_manager.exceptions import (
     InvalidDataError,
@@ -16,11 +15,11 @@ ALLOWED_STATUSES = {
 }
 
 
-class Order(ABC):
+class Order:
     def __init__(
         self,
         client_user,
-        services_list,
+        services_list=None,
         status="Scheduled",
         date=None,
         start_time=None,
@@ -32,19 +31,11 @@ class Order(ABC):
             )
 
         if services_list is None:
-            raise InvalidDataError(
-                "At least one service must be selected."
-            )
-
-        if isinstance(services_list, (list, tuple)):
+            self._services = []
+        elif isinstance(services_list, (list, tuple)):
             self._services = list(services_list)
         else:
             self._services = [services_list]
-
-        if not self._services:
-            raise InvalidDataError(
-                "At least one service must be selected."
-            )
 
         if any(service is None for service in self._services):
             raise InvalidDataError(
@@ -60,13 +51,37 @@ class Order(ABC):
         else:
             self._staff_username = "Unknown"
 
-        self.__validate_date(date)
+        if date is not None:
+            self.__validate_date(date)
+
         self.__validate_status(status)
 
         self._date = date
         self._status = status
         self.start_time = self.__validate_start_time(start_time)
+        self.payment_method = None
+        self.payment_status = "pending"
+        self.fulfillment_method = None
+        self.delivery_address = None
+
+        # One shared list for procedures and products.
+        self._items = []
+
+        for service in self._services:
+            self._items.append({
+                "type": "procedure",
+                "name": getattr(service, "name", str(service)),
+                "quantity": 1,
+                "unit_price": float(service.base_price),
+                "procedure_item": service,
+            })
+
+        self.products = []
+        self._product_quantity = 0
+        self.product_price = 0.0
         self.total_price = 0.0
+
+        self._set_and_validate_price(self.calculate_price())
 
     @staticmethod
     def __validate_status(status):
@@ -121,12 +136,37 @@ class Order(ABC):
                 "Appointment date cannot be in the past."
             )
 
+    @staticmethod
+    def __validate_quantity(quantity):
+        if (
+            isinstance(quantity, bool)
+            or not isinstance(quantity, int)
+            or quantity < 0
+        ):
+            raise InvalidDataError(
+                "Product quantity must be a non-negative integer."
+            )
+
+    @staticmethod
+    def __validate_product_price(price):
+        if (
+            isinstance(price, bool)
+            or not isinstance(price, (int, float))
+            or price < 0
+        ):
+            raise InvalidDataError(
+                "Product price must be a non-negative number."
+            )
+
     @property
     def staff(self):
         return self._staff_username
 
     @property
     def service(self):
+        if not self._services:
+            return "No procedures"
+
         return ", ".join(
             getattr(service, "name", str(service))
             for service in self._services
@@ -150,6 +190,41 @@ class Order(ABC):
     @property
     def status(self):
         return self._status
+
+    @property
+    def items(self):
+        """Return order items without internal object references."""
+        return [
+            {
+                key: value
+                for key, value in item.items()
+                if key not in ("inventory_item", "procedure_item")
+            }
+            for item in self._items
+        ]
+
+    @property
+    def product_quantity(self):
+        return self._product_quantity
+
+    @property
+    def product_items(self):
+        return [
+            {
+                "name": item["name"],
+                "unit_price": item["unit_price"],
+                "quantity": item["quantity"],
+            }
+            for item in self._items
+            if item["type"] == "product"
+        ]
+
+    def validate_items(self):
+        """An order must contain at least one product or procedure."""
+        if not self._items:
+            raise InvalidDataError(
+                "An order must contain at least one item."
+            )
 
     def get_client_name(self, viewer_user):
         if (
@@ -185,6 +260,30 @@ class Order(ABC):
         self.__validate_date(new_date)
         self._date = new_date
 
+    def _consume_reserved_products(self):
+        for item in self._items:
+            if item["type"] != "product":
+                continue
+
+            inventory_item = item.get("inventory_item")
+
+            if inventory_item is not None:
+                inventory_item.use_reserved_product(
+                    item["quantity"]
+                )
+
+    def _release_reserved_products(self):
+        for item in self._items:
+            if item["type"] != "product":
+                continue
+
+            inventory_item = item.get("inventory_item")
+
+            if inventory_item is not None:
+                inventory_item.release_reserved_product(
+                    item["quantity"]
+                )
+
     def change_status(self, new_status, user):
         if not getattr(user, "is_admin", False):
             raise AccessDeniedError(
@@ -204,6 +303,11 @@ class Order(ABC):
             )
 
         old_status = self._status
+
+        if new_status == "Completed" and old_status != "Completed":
+            self.validate_items()
+            self._consume_reserved_products()
+
         self._status = new_status
 
         print(
@@ -224,6 +328,7 @@ class Order(ABC):
             )
 
         self._status = "Cancelled"
+        self._release_reserved_products()
 
     def _set_and_validate_price(self, price):
         if isinstance(price, bool) or not isinstance(
@@ -240,13 +345,175 @@ class Order(ABC):
 
         self.total_price = float(price)
 
-    @abstractmethod
     def calculate_price(self):
-        raise NotImplementedError
+        return sum(
+            item["unit_price"] * item["quantity"]
+            for item in self._items
+        )
+
+    def add_product(self, inventory_item, user, quantity=1):
+        if not (
+            getattr(user, "is_admin", False)
+            or user == self._client_user
+        ):
+            raise AccessDeniedError(
+                "Only the order owner or an administrator can add products."
+            )
+
+        if not hasattr(inventory_item, "reserve_product"):
+            raise InvalidDataError("Invalid inventory item.")
+
+        if (
+            not isinstance(inventory_item.product_name, str)
+            or not inventory_item.product_name.strip()
+        ):
+            raise InvalidDataError("Product name cannot be empty.")
+
+        self.__validate_quantity(quantity)
+
+        if quantity == 0:
+            raise InvalidDataError(
+                "Product quantity must be greater than zero."
+            )
+
+        product_name = inventory_item.product_name
+        product_price = inventory_item.price_per_item
+
+        self.__validate_product_price(product_price)
+
+        inventory_item.reserve_product(quantity)
+
+        self._items.append({
+            "type": "product",
+            "name": product_name,
+            "unit_price": float(product_price),
+            "quantity": quantity,
+            "inventory_item": inventory_item,
+        })
+
+        self.products.append(product_name)
+        self._product_quantity += quantity
+
+        self.product_price = sum(
+            item["unit_price"]
+            for item in self._items
+            if item["type"] == "product"
+        )
+
+        self._set_and_validate_price(self.calculate_price())
+
+        print(
+            f"Product added: {product_name}. "
+            f"New total price: ${self.total_price:.2f}"
+        )
+
+    def change_product_quantity(self, product_name, new_quantity, user):
+        if not (
+            getattr(user, "is_admin", False)
+            or user == self._client_user
+        ):
+            raise AccessDeniedError(
+                "Only the order owner or an administrator can change product quantity."
+            )
+
+        self.__validate_quantity(new_quantity)
+
+        if not isinstance(product_name, str) or not product_name.strip():
+            raise InvalidDataError("Product name cannot be empty.")
+
+        product_item = next(
+            (
+                item for item in self._items
+                if (
+                    item["type"] == "product"
+                    and item["name"].casefold() == product_name.casefold()
+                )
+            ),
+            None,
+        )
+
+        if product_item is None:
+            raise InvalidDataError(
+                f"Product '{product_name}' was not found in this order."
+            )
+
+        inventory_item = product_item.get("inventory_item")
+
+        if inventory_item is None:
+            raise InvalidDataError(
+                "This product is not linked to an inventory item."
+            )
+
+        old_quantity = product_item["quantity"]
+        difference = new_quantity - old_quantity
+
+        if difference > 0:
+            inventory_item.reserve_product(difference)
+        elif difference < 0:
+            inventory_item.release_reserved_product(abs(difference))
+
+        product_item["quantity"] = new_quantity
+
+        self._product_quantity = sum(
+            item["quantity"]
+            for item in self._items
+            if item["type"] == "product"
+        )
+
+        self._set_and_validate_price(self.calculate_price())
+
+    def complete_purchase(self):
+        """Complete a product-only purchase immediately."""
+        if self._status in ("Completed", "Cancelled"):
+            raise InvalidDataError(
+                f"Cannot complete an order that is already {self._status}."
+            )
+
+        self.validate_items()
+        self._consume_reserved_products()
+        self._status = "Completed"
+
+    def process_bonus_system(self, current_bonuses):
+        if (
+            isinstance(current_bonuses, bool)
+            or not isinstance(current_bonuses, (int, float))
+            or current_bonuses < 0
+        ):
+            raise InvalidDataError(
+                "Bonus balance must be a non-negative number."
+            )
+
+        order_price = self.calculate_price()
+        max_discount = order_price * 0.5
+        applied_discount = min(
+            float(current_bonuses),
+            max_discount,
+        )
+
+        final_price = order_price - applied_discount
+        cashback = final_price * 0.1
+        remaining_bonuses = (
+            float(current_bonuses)
+            - applied_discount
+            + cashback
+        )
+
+        return (
+            round(final_price, 2),
+            round(applied_discount, 2),
+            round(remaining_bonuses, 2),
+        )
 
     def __str__(self):
+        appointment_info = ""
+
+        if self._date is not None:
+            appointment_info = (
+                f"[{self._date} {self.start_time}] "
+            )
+
         return (
-            f"[{self._date} {self.start_time}] "
+            f"{appointment_info}"
             f"Client: {self._client_user.username} | "
             f"Services: {self.service} | "
             f"Staff: {self.staff} | "
@@ -289,6 +556,9 @@ class ProcedureAppointment(Order):
 
         supplied_total_price = kwargs.get("total_price")
 
+        self.__validate_quantity(product_quantity)
+        self.__validate_product_price(product_price)
+
         super().__init__(
             client_user=actual_client,
             services_list=actual_services,
@@ -298,29 +568,30 @@ class ProcedureAppointment(Order):
             employee=actual_employee,
         )
 
-        self.__validate_quantity(product_quantity)
-        self.__validate_product_price(product_price)
+        if product_name != "None" and product_name and product_quantity > 0:
+            self._items.append({
+                "type": "product",
+                "name": product_name,
+                "unit_price": float(product_price),
+                "quantity": product_quantity,
+                "inventory_item": None,
+            })
 
-        self.products = []
-        self._product_items = []
-        self.product_price = float(product_price)
-        self._product_quantity = product_quantity
-
-        if product_name != "None" and product_name:
             self.products.append(product_name)
-            if product_quantity > 0:
-                self._product_items.append(
-                    {
-                        "name": product_name,
-                        "unit_price": float(product_price),
-                        "quantity": product_quantity,
-                    }
-                )
+            self._product_quantity += product_quantity
+
+        self.product_price = sum(
+            item["unit_price"]
+            for item in self._items
+            if item["type"] == "product"
+        )
 
         if supplied_total_price is not None:
             self._set_and_validate_price(supplied_total_price)
         else:
             self._set_and_validate_price(self.calculate_price())
+
+        self.validate_items()
 
     @staticmethod
     def __validate_quantity(quantity):
@@ -343,172 +614,3 @@ class ProcedureAppointment(Order):
             raise InvalidDataError(
                 "Product price must be a non-negative number."
             )
-
-    @property
-    def product_quantity(self):
-        return self._product_quantity
-
-    @property
-    def product_items(self):
-        """Return product names, unit prices and individual quantities."""
-        return [item.copy() for item in self._product_items]
-
-    def change_product_quantity(self, product_name, new_quantity, user):
-        if not (
-            getattr(user, "is_admin", False)
-            or user == self._client_user
-        ):
-            raise AccessDeniedError(
-                "Only the appointment owner or an administrator can change product quantity."
-            )
-
-        self.__validate_quantity(new_quantity)
-
-        if not isinstance(product_name, str) or not product_name.strip():
-            raise InvalidDataError("Product name cannot be empty.")
-
-        product_item = next(
-            (
-                item for item in self._product_items
-                if item["name"].casefold() == product_name.casefold()
-            ),
-            None,
-        )
-
-        if product_item is None:
-            raise InvalidDataError(
-                f"Product '{product_name}' was not found in this appointment."
-            )
-
-        inventory_item = product_item["inventory_item"]
-        old_quantity = product_item["quantity"]
-        difference = new_quantity - old_quantity
-
-        if difference > 0:
-            inventory_item.reserve_product(difference)
-
-        elif difference < 0:
-            inventory_item.release_reserved_product(abs(difference))
-
-        product_item["quantity"] = new_quantity
-
-        self._product_quantity = sum(
-            item["quantity"] for item in self._product_items
-        )
-
-        self._set_and_validate_price(self.calculate_price())
-
-
-    def calculate_price(self):
-        services_total = sum(
-            service.base_price
-            for service in self._services
-        )
-
-        products_total = sum(
-            item["unit_price"] * item["quantity"]
-            for item in self._product_items
-        )
-
-        return services_total + products_total
-
-    def add_product(
-        self,
-        inventory_item,
-        user,
-        quantity=1,
-    ):
-        if not (
-            getattr(user, "is_admin", False)
-            or user == self._client_user
-        ):
-            raise AccessDeniedError(
-                "Only the appointment owner or an administrator can add products."
-            )
-
-        if not hasattr(inventory_item, "reserve_product"):
-            raise InvalidDataError("Invalid inventory item.")
-
-        if not isinstance(inventory_item.product_name, str) or not inventory_item.product_name.strip():
-            raise InvalidDataError("Product name cannot be empty.")
-
-        self.__validate_quantity(quantity)
-
-        if quantity == 0:
-            raise InvalidDataError(
-                "Product quantity must be greater than zero."
-            )
-
-        product_name = inventory_item.product_name
-        product_price = inventory_item.price_per_item
-
-        # Reserve products before adding them to the appointment.
-        inventory_item.reserve_product(quantity)
-
-        self.products.append(product_name)
-        self._product_items.append(
-            {
-                "name": product_name,
-                "unit_price": float(product_price),
-                "quantity": quantity,
-                "inventory_item": inventory_item,
-            }
-        )
-
-        self._product_quantity += quantity
-        self.product_price = sum(
-            item["unit_price"]
-            for item in self._product_items
-        )
-
-        self._set_and_validate_price(self.calculate_price())
-
-        print(
-            f"Product added: {product_name}. "
-            f"New total price: ${self.total_price:.2f}"
-        )
-    def process_bonus_system(self, current_bonuses):
-        if (
-            isinstance(current_bonuses, bool)
-            or not isinstance(current_bonuses, (int, float))
-            or current_bonuses < 0
-        ):
-            raise InvalidDataError(
-                "Bonus balance must be a non-negative number."
-            )
-
-        order_price = self.calculate_price()
-        max_discount = order_price * 0.5
-        applied_discount = min(
-            float(current_bonuses),
-            max_discount,
-        )
-
-        final_price = order_price - applied_discount
-        cashback = final_price * 0.1
-        remaining_bonuses = (
-            float(current_bonuses)
-            - applied_discount
-            + cashback
-        )
-
-        return (
-            round(final_price, 2),
-            round(applied_discount, 2),
-            round(remaining_bonuses, 2),
-        )
-
-    def _release_reserved_products(self):
-        for item in self._product_items:
-            inventory_item = item.get("inventory_item")
-
-            if inventory_item is not None:
-                inventory_item.release_reserved_product(item["quantity"])    
-
-    def cancel_by_client(self, user):
-        super().cancel_by_client(user)
-        self._release_reserved_products()
-
-
-
-

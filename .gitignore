@@ -1,6 +1,9 @@
 
 .venv/
 
+# Database backups
+backups/
+
 django_homework/
 
 # Byte-compiled / optimized / DLL files
