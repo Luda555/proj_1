@@ -126,39 +126,39 @@ CREATE TABLE employee_rating (
     score INT  NOT NULL CHECK (score BETWEEN 1 AND 5)
 );    
 
--- 1. Пошук замовлень клієнта
+-- 1. Search for a client's orders
 CREATE INDEX IF NOT EXISTS idx_orders_client_id
 ON orders(client_id);
 
--- 2. Пошук товарів у замовленні
+-- 2. Search for products in an order
 CREATE INDEX IF NOT EXISTS idx_order_products_order_id
 ON order_products(order_id);
 
--- 3. Пошук продажів конкретного товару
+-- 3. Search for sales of a specific product
 CREATE INDEX IF NOT EXISTS idx_order_products_product_id
 ON order_products(product_id);
 
--- 4. Пошук процедур у замовленні
+-- 4. Search for procedures in an order
 CREATE INDEX IF NOT EXISTS idx_order_procedures_order_id
 ON order_procedures(order_id);
 
--- 5. Пошук замовлень із конкретною процедурою
+-- 5. Search for orders containing a specific procedure
 CREATE INDEX IF NOT EXISTS idx_order_procedures_procedure_id
 ON order_procedures(procedure_id);
 
--- 6. Пошук процедур, виконаних працівником
+-- 6. Search for procedures performed by an employee
 CREATE INDEX IF NOT EXISTS idx_order_procedures_employee_id
 ON order_procedures(employee_id);
 
--- 7. Пошук працівників, які виконують процедуру
+-- 7. Search for employees qualified to perform a procedure
 CREATE INDEX IF NOT EXISTS idx_employee_procedures_procedure_id
 ON employee_procedures(procedure_id);
 
--- 8. Пошук оцінок клієнта
+-- 8. Search for ratings submitted by a client
 CREATE INDEX IF NOT EXISTS idx_employee_rating_client_id
 ON employee_rating(client_id);
 
--- 9. Пошук оцінок працівника
+-- 9. Search for ratings received by an employee
 CREATE INDEX IF NOT EXISTS idx_employee_rating_employee_id
 ON employee_rating(employee_id);
 
